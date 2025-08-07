@@ -2,12 +2,11 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- Global State & Config ---
     const state = {
-        sessionConfigs: {}, // Will store credentials after login
+        sessionConfigs: {},
         outgoingSession: null,
         incomingSession: null,
         isConnecting: false,
         isConnected: false,
-        hasAudioPermission: false,
         supportsSinkId: typeof HTMLAudioElement !== 'undefined' && typeof HTMLAudioElement.prototype.setSinkId === 'function'
     };
 
@@ -17,12 +16,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const loginPage = document.getElementById('login-page');
     const appPage = document.getElementById('app-page');
     const loginForm = document.getElementById('login-form');
+    const loginStatus = document.getElementById('login-status');
     const connectionToggleBtn = document.getElementById('connection-toggle-btn');
     const duckingSlider = document.getElementById('ducking-slider');
 
-    // ===================================================================================
-    // --- INITIALIZATION FLOW ---
-    // ===================================================================================
+    // --- Main Initialization ---
     function init() {
         populateLanguageDropdowns();
         loginForm.addEventListener('submit', handleLogin);
@@ -35,17 +33,27 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function handleLogin(e) {
-        e.preventDefault(); // Prevent page refresh
-        
-        // Store credentials from the form
-        state.sessionConfigs.outgoing = getConfigFromUI('outgoing', true);
-        state.sessionConfigs.incoming = getConfigFromUI('incoming', true);
+    // ===================================================================================
+    // --- INITIALIZATION FLOW ---
+    // ===================================================================================
+    async function handleLogin(e) {
+        e.preventDefault();
+        showLoginStatus("Getting audio devices...");
+        try {
+            // This is the critical step: get permissions and devices BEFORE loading the main page.
+            await refreshAllDeviceLists(); 
+            
+            // Store credentials from the form for later use
+            state.sessionConfigs.outgoing = getConfigFromUI('outgoing', true);
+            state.sessionConfigs.incoming = getConfigFromUI('incoming', true);
 
-        // Switch to the main app page. No permissions requested yet.
-        loginPage.style.display = 'none';
-        appPage.style.display = 'flex';
-        setupUIEventListeners();
+            // Now, transition to the main page
+            loginPage.style.display = 'none';
+            appPage.style.display = 'flex';
+            setupUIEventListeners();
+        } catch (err) {
+            showLoginStatus("Could not access audio devices. Please grant permission and try again.", true);
+        }
     }
     
     // ===================================================================================
@@ -78,7 +86,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 };
                 this.websocket.onmessage = (event) => { clearTimeout(timeout); this.handleMessage(event, resolve, reject); };
                 this.websocket.onerror = (err) => { clearTimeout(timeout); this.updateStatus('error', `${this.type}: Connection Error`); reject(err); };
-                this.websocket.onclose = () => { clearTimeout(timeout);
+                this.websocket.onclose = () => {
+                    clearTimeout(timeout);
                     if (this.status !== 'connected') { this.updateStatus('error', `${this.type}: Connection Failed`); reject(new Error(`${this.type}: Connection closed unexpectedly.`)); }
                     else { this.updateStatus('disconnected', 'Disconnected'); }
                 };
@@ -152,27 +161,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function connectAll() {
         if (state.isConnecting) return;
-
-        // --- NEW: Request permissions on first connect attempt ---
-        if (!state.hasAudioPermission) {
-            try {
-                await refreshAllDeviceLists();
-                state.hasAudioPermission = true;
-            } catch(err) {
-                alert("Audio permissions are required to use this application. Please allow access and try again.");
-                return;
-            }
-        }
-
         state.isConnecting = true;
         updateConnectionButton(true, "Cancel");
-
+        // Get the latest settings from the UI just before connecting
         const outConfig = getConfigFromUI('outgoing');
         const inConfig = getConfigFromUI('incoming');
-
         state.outgoingSession = new WordlySession('join', outConfig);
         state.incomingSession = new WordlySession('attend', inConfig);
-
         try {
             await Promise.all([ state.outgoingSession.connect(), state.incomingSession.connect() ]);
             state.isConnected = true;
@@ -188,23 +183,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function disconnectAll() {
-        state.outgoingSession?.disconnect();
-        state.incomingSession?.disconnect();
+        state.outgoingSession?.disconnect(); state.incomingSession?.disconnect();
         state.isConnected = false; state.isConnecting = false;
         updateConnectionButton(false);
     }
     
     function getConfigFromUI(type, fromLoginPage = false) {
         const idPrefix = type;
-        // Read from login page if specified, otherwise from main app page
         const sourceElement = fromLoginPage ? document : appPage;
+        // Use the stored credentials for subsequent connections
+        const creds = fromLoginPage ? sourceElement : state.sessionConfigs;
+
         return {
-            sessionId: sourceElement.getElementById(`${idPrefix}-session-id`)?.value, 
-            passcode: sourceElement.getElementById(`${idPrefix}-passcode`)?.value,
-            inputDeviceId: sourceElement.getElementById(`${idPrefix}-input-device-select`)?.value, 
-            sourceLanguage: sourceElement.getElementById(`${idPrefix}-source-language-select`)?.value,
-            targetLanguage: sourceElement.getElementById(`${idPrefix}-target-language-select`)?.value, 
-            outputDeviceId: sourceElement.getElementById(`${idPrefix}-output-device-select`)?.value,
+            sessionId: creds.getElementById(`${idPrefix}-session-id`).value, 
+            passcode: creds.getElementById(`${idPrefix}-passcode`)?.value,
+            inputDeviceId: document.getElementById(`${idPrefix}-input-device-select`).value, 
+            sourceLanguage: document.getElementById(`${idPrefix}-source-language-select`).value,
+            targetLanguage: document.getElementById(`${idPrefix}-target-language-select`).value, 
+            outputDeviceId: document.getElementById(`${idPrefix}-output-device-select`).value,
             ui: { statusLight: document.querySelector(`#${idPrefix}-session .session-status-light`), 
                   transcript: document.querySelector(`#${idPrefix}-session .session-transcript`),
                   visualizer: document.querySelector(`#${idPrefix}-session .audio-level`), 
@@ -256,12 +252,11 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('incoming-target-language-select').value = 'en';
     }
 
-    function showPermissionStatus(message, isError = false) {
-        permissionStatus.textContent = message;
-        permissionStatus.className = isError ? 'status-message error' : 'status-message success';
-        permissionStatus.style.display = 'block';
+    function showLoginStatus(message, isError = false) {
+        loginStatus.textContent = message;
+        loginStatus.className = isError ? 'status-message error' : 'status-message success';
+        loginStatus.style.display = 'block';
     }
     
-    // --- Run Initializer ---
     init();
 });
