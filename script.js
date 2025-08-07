@@ -37,27 +37,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- INITIALIZATION FLOW ---
     // ===================================================================================
     async function handleLogin(e) {
-        e.preventDefault();
-        showLoginStatus("Getting audio devices...");
+        e.preventDefault(); // Prevent page refresh
+        showLoginStatus("Getting audio devices & permissions...");
         try {
             // This is the critical step: get permissions and devices BEFORE loading the main page.
             await refreshAllDeviceLists(); 
             
             // Store credentials from the form for later use
-            state.sessionConfigs.outgoing = getConfigFromUI('outgoing', true);
-            state.sessionConfigs.incoming = getConfigFromUI('incoming', true);
+            state.sessionConfigs.outgoing = getCredentialsFromUI('outgoing');
+            state.sessionConfigs.incoming = getCredentialsFromUI('incoming');
 
             // Now, transition to the main page
             loginPage.style.display = 'none';
             appPage.style.display = 'flex';
             setupUIEventListeners();
         } catch (err) {
+            console.error("Failed to get audio permissions:", err);
             showLoginStatus("Could not access audio devices. Please grant permission and try again.", true);
         }
     }
     
     // ===================================================================================
-    // --- Core Session Class (Unchanged) ---
+    // --- Core Session Class ---
     // ===================================================================================
     class WordlySession {
         constructor(type, config) {
@@ -163,9 +164,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.isConnecting) return;
         state.isConnecting = true;
         updateConnectionButton(true, "Cancel");
-        // Get the latest settings from the UI just before connecting
-        const outConfig = getConfigFromUI('outgoing');
-        const inConfig = getConfigFromUI('incoming');
+        const outConfig = getSettingsFromUI('outgoing');
+        const inConfig = getSettingsFromUI('incoming');
         state.outgoingSession = new WordlySession('join', outConfig);
         state.incomingSession = new WordlySession('attend', inConfig);
         try {
@@ -188,23 +188,25 @@ document.addEventListener('DOMContentLoaded', () => {
         updateConnectionButton(false);
     }
     
-    function getConfigFromUI(type, fromLoginPage = false) {
-        const idPrefix = type;
-        const sourceElement = fromLoginPage ? document : appPage;
-        // Use the stored credentials for subsequent connections
-        const creds = fromLoginPage ? sourceElement : state.sessionConfigs;
-
+    function getCredentialsFromUI(type) {
         return {
-            sessionId: creds.getElementById(`${idPrefix}-session-id`).value, 
-            passcode: creds.getElementById(`${idPrefix}-passcode`)?.value,
-            inputDeviceId: document.getElementById(`${idPrefix}-input-device-select`).value, 
-            sourceLanguage: document.getElementById(`${idPrefix}-source-language-select`).value,
-            targetLanguage: document.getElementById(`${idPrefix}-target-language-select`).value, 
-            outputDeviceId: document.getElementById(`${idPrefix}-output-device-select`).value,
-            ui: { statusLight: document.querySelector(`#${idPrefix}-session .session-status-light`), 
-                  transcript: document.querySelector(`#${idPrefix}-session .session-transcript`),
-                  visualizer: document.querySelector(`#${idPrefix}-session .audio-level`), 
-                  muteBtn: document.querySelector(`#${idPrefix}-session .mute-btn`),
+            sessionId: document.getElementById(`${type}-session-id`).value, 
+            passcode: document.getElementById(`${type}-passcode`)?.value,
+        };
+    }
+
+    function getSettingsFromUI(type) {
+        const creds = state.sessionConfigs[type];
+        return {
+            sessionId: creds.sessionId, passcode: creds.passcode,
+            inputDeviceId: document.getElementById(`${type}-input-device-select`).value, 
+            sourceLanguage: document.getElementById(`${type}-source-language-select`).value,
+            targetLanguage: document.getElementById(`${type}-target-language-select`).value, 
+            outputDeviceId: document.getElementById(`${type}-output-device-select`).value,
+            ui: { statusLight: document.querySelector(`#${type}-session .session-status-light`), 
+                  transcript: document.querySelector(`#${type}-session .session-transcript`),
+                  visualizer: document.querySelector(`#${type}-session .audio-level`), 
+                  muteBtn: document.querySelector(`#${type}-session .mute-btn`),
             }
         };
     }
@@ -222,6 +224,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function refreshAllDeviceLists() {
+        // This function now just gets and populates devices.
+        // It requires a user gesture (like a click) to be called.
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const devices = await navigator.mediaDevices.enumerateDevices();
         stream.getTracks().forEach(track => track.stop());
