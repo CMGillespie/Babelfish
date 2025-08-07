@@ -1,4 +1,4 @@
-// Wordly Babelfish - Final Corrected Workflow
+// Wordly Babelfish - Corrected Workflow
 document.addEventListener('DOMContentLoaded', () => {
     // --- Global State & Config ---
     const state = {
@@ -37,15 +37,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- INITIALIZATION FLOW ---
     // ===================================================================================
     async function handleLogin(e) {
-        e.preventDefault();
+        e.preventDefault(); // Prevent page refresh
         showLoginStatus("Getting audio devices & permissions...");
         try {
+            // This is the critical step: get permissions and devices BEFORE loading the main page.
             await refreshAllDeviceLists();
             
             // Store credentials from the form for later use
             state.sessionConfigs.outgoing = getCredentialsFromUI('outgoing');
             state.sessionConfigs.incoming = getCredentialsFromUI('incoming');
 
+            // Now, transition to the main page
             loginPage.style.display = 'none';
             appPage.style.display = 'flex';
             setupUIEventListeners();
@@ -162,8 +164,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.isConnecting) return;
         state.isConnecting = true;
         updateConnectionButton(true, "Cancel");
+
         const outConfig = getSettingsFromUI('outgoing');
         const inConfig = getSettingsFromUI('incoming');
+
         state.outgoingSession = new WordlySession('join', outConfig);
         state.incomingSession = new WordlySession('attend', inConfig);
         try {
@@ -192,14 +196,11 @@ document.addEventListener('DOMContentLoaded', () => {
             passcode: document.getElementById(`${type}-passcode`)?.value,
         };
     }
-
-    // *** BUG FIX IS HERE ***
+    
     function getSettingsFromUI(type) {
-        // This function now correctly merges the stored credentials with the current UI selections.
-        const creds = state.sessionConfigs[type]; 
+        const creds = state.sessionConfigs[type];
         return {
-            sessionId: creds.sessionId, 
-            passcode: creds.passcode,
+            sessionId: creds.sessionId, passcode: creds.passcode,
             inputDeviceId: document.getElementById(`${type}-input-device-select`).value, 
             sourceLanguage: document.getElementById(`${type}-source-language-select`).value,
             targetLanguage: document.getElementById(`${type}-target-language-select`).value, 
