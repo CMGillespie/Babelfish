@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wordly Babelfish</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="login-page">
+    <div class="login-card">
+      <h1>Wordly Babelfish</h1>
+      <p class="login-instructions">Enter your session credentials below, or create a bookmark with the credentials in the URL to pre-fill this form automatically.</p>
+      <form id="login-form">
+        <div class="session-login-group">
+          <h3>My Voice Session (Outgoing)</h3>
+          <div class="form-group">
+            <label for="outgoing-session-id">Join Session ID:</label>
+            <input type="text" id="outgoing-session-id" placeholder="XXXX-0000" required>
+          </div>
+          <div class="form-group">
+            <label for="outgoing-passcode">Join Passcode:</label>
+            <input type="text" id="outgoing-passcode" placeholder="Required passcode" required>
+          </div>
+        </div>
+        <div class="session-login-group">
+          <h3>Their Voice Session (Incoming)</h3>
+          <div class="form-group">
+            <label for="incoming-session-id">Attend Session ID:</label>
+            <input type="text" id="incoming-session-id" placeholder="XXXX-0000" required>
+          </div>
+          <div class="form-group">
+            <label for="incoming-passcode">Attend Passcode:</label>
+            <input type="text" id="incoming-passcode" placeholder="Optional passcode">
+          </div>
+        </div>
+        <button type="submit" class="login-button">Load Session & Configure</button>
+      </form>
+      <div class="status-message" id="login-status"></div>
+    </div>
+  </div>
+
+  <div id="app-page" style="display: none;">
+    <header>
+      <h1>Wordly Babelfish</h1>
+      <div class="session-info">
+        <button id="connection-toggle-btn" class="connect-button">Connect All</button>
+      </div>
+    </header>
+    
+    <main>
+      <div id="session-grid" class="session-grid">
+        <div id="outgoing-session" class="session-panel">
+          <div class="session-header">
+            <div class="session-title">
+              <span class="session-status-light disconnected"></span>
+              <h2>My Voice (Outgoing)</h2>
+            </div>
+            <div class="session-controls">
+              <button class="session-btn mute-btn" data-action="mute">Mute</button>
+            </div>
+          </div>
+          <div class="session-settings">
+            <div class="setting-group device-group">
+              <span class="setting-label">1. Input Device (My Mic):</span>
+              <select class="setting-select" id="outgoing-input-device-select"></select>
+              <button class="refresh-btn" data-target="outgoing-input-device-select" title="Refresh device list">↻</button>
+            </div>
+            <div class="setting-group">
+              <span class="setting-label">2. My Language (I'm Speaking):</span>
+              <select class="setting-select" id="outgoing-source-language-select"></select>
+            </div>
+            <div class="setting-group">
+                <span class="setting-label">3. Translate To (For Them):</span>
+                <select class="setting-select" id="outgoing-target-language-select"></select>
+            </div>
+            <div class="setting-group device-group">
+                <span class="setting-label">4. Output To (e.g., Virtual Cable):</span>
+                <select class="setting-select" id="outgoing-output-device-select"></select>
+                 <button class="refresh-btn" data-target="outgoing-output-device-select" title="Refresh device list">↻</button>
+            </div>
+          </div>
+          <div class="session-content">
+            <div class="audio-visualizer">
+              <div class="audio-level"></div>
+            </div>
+             <div class="session-transcript"></div>
+          </div>
+        </div>
+        
+        <div id="incoming-session" class="session-panel">
+          <div class="session-header">
+            <div class="session-title">
+              <span class="session-status-light disconnected"></span>
+              <h2>Their Voice (Incoming)</h2>
+            </div>
+            <div class="session-controls">
+               <label class="toggle">
+                  <input type="checkbox" id="incoming-audio-toggle" checked>
+                  <span class="slider"></span>
+                  <span class="setting-label">Audio</span>
+                </label>
+            </div>
+          </div>
+          <div class="session-settings">
+            <div class="setting-group device-group">
+                <span class="setting-label">1. Input Device (e.g., Virtual Cable):</span>
+                <select class="setting-select" id="incoming-input-device-select"></select>
+                 <button class="refresh-btn" data-target="incoming-input-device-select" title="Refresh device list">↻</button>
+            </div>
+            <div class="setting-group">
+                <span class="setting-label">2. Their Language (They're Speaking):</span>
+                <select class="setting-select" id="incoming-source-language-select"></select>
+            </div>
+            <div class="setting-group">
+              <span class="setting-label">3. Translate To (For Me):</span>
+              <select class="setting-select" id="incoming-target-language-select"></select>
+            </div>
+             <div class="setting-group device-group">
+              <span class="setting-label">4. Output To (My Headphones):</span>
+              <select class="setting-select" id="incoming-output-device-select"></select>
+               <button class="refresh-btn" data-target="incoming-output-device-select" title="Refresh device list">↻</button>
+            </div>
+             <div class="setting-group ducking-group">
+                <span class="setting-label">Ducking Volume:</span>
+                <input type="range" id="ducking-slider" min="0" max="1" value="0.2" step="0.05">
+                <span id="ducking-value">20%</span>
+            </div>
+          </div>
+          <div class="session-content">
+            <div class="session-transcript"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  
+  <script>
+    // This inline script runs immediately to check for URL parameters
+    document.addEventListener('DOMContentLoaded', () => {
+        const params = new URLSearchParams(window.location.search);
+        const out_id = params.get('out_id');
+        const out_key = params.get('out_key');
+        const in_id = params.get('in_id');
+        const in_key = params.get('in_key');
+
+        if (out_id) document.getElementById('outgoing-session-id').value = out_id;
+        if (out_key) document.getElementById('outgoing-passcode').value = out_key;
+        if (in_id) document.getElementById('incoming-session-id').value = in_id;
+        if (in_key) document.getElementById('incoming-passcode').value = in_key;
+    });
+  </script>
+  <script src="script.js"></script>
+</body>
+</html>
