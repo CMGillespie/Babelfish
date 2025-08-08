@@ -1,10 +1,8 @@
-// Wordly Babelfish - Corrected Workflow
+// Wordly Babelfish - Isolate & Orchestrate Strategy
 document.addEventListener('DOMContentLoaded', () => {
     // --- Global State & Config ---
     const state = {
-        sessionConfigs: {}, // Will store credentials after login
-        outgoingSession: null,
-        incomingSession: null,
+        sessionConfigs: {},
         isConnecting: false,
         isConnected: false,
         supportsSinkId: typeof HTMLAudioElement !== 'undefined' && typeof HTMLAudioElement.prototype.setSinkId === 'function'
@@ -20,34 +18,176 @@ document.addEventListener('DOMContentLoaded', () => {
     const connectionToggleBtn = document.getElementById('connection-toggle-btn');
     const duckingSlider = document.getElementById('ducking-slider');
 
-    // --- Main Initialization ---
-    function init() {
-        populateLanguageDropdowns();
-        loginForm.addEventListener('submit', handleLogin);
-        connectionToggleBtn.addEventListener('click', handleConnectionToggle);
-        duckingSlider.addEventListener('input', (e) => {
-            document.getElementById('ducking-value').textContent = `${Math.round(e.target.value * 100)}%`;
-        });
-        document.querySelectorAll('.refresh-btn').forEach(btn => {
-            btn.addEventListener('click', refreshAllDeviceLists);
-        });
-    }
+    // ===================================================================================
+    // --- MODULE 1: OUTGOING "JOIN" SESSION (Based on your new, validated script) ---
+    // ===================================================================================
+    const outgoingModule = {
+        websocket: null, status: 'disconnected', config: {}, mediaStream: null,
+        audioContext: null, audioLevel: 0, muted: false,
+
+        connect: function(config) {
+            this.config = config;
+            return new Promise((resolve, reject) => {
+                this.updateStatus('connecting', 'Connecting...');
+                const endpoint = 'wss://dev-endpoint.wordly.ai/present';
+                this.websocket = new WebSocket(endpoint);
+                this.websocket.binaryType = 'arraybuffer';
+                const timeout = setTimeout(() => { this.websocket.close(); reject(new Error("Join: Connection timed out.")); }, 10000);
+                this.websocket.onopen = () => {
+                    const connectRequest = {
+                        type: 'connect', presentationCode: this.config.sessionId, accessKey: this.config.passcode,
+                        languageCode: this.config.sourceLanguage, speakerId: `babelfish-join-${Date.now()}`,
+                        name: 'My Voice (Babelfish)', connectionCode: 'wordly-join-app', context: null
+                    };
+                    this.send(connectRequest);
+                };
+                this.websocket.onmessage = (event) => { clearTimeout(timeout); this.handleMessage(event, resolve, reject); };
+                this.websocket.onerror = (err) => { clearTimeout(timeout); this.updateStatus('error', 'Join: Connection Error'); reject(err); };
+                this.websocket.onclose = (event) => { clearTimeout(timeout);
+                    if (this.status !== 'connected') { this.updateStatus('error', 'Join: Connection Failed'); reject(new Error(`Join: Connection closed unexpectedly. Code: ${event.code}`)); }
+                    else { this.updateStatus('disconnected', 'Disconnected'); }
+                };
+            });
+        },
+        
+        handleMessage: function(event, resolve, reject) {
+            const decoder = new TextDecoder('utf-8');
+            let message;
+            try { message = JSON.parse(decoder.decode(event.data)); }
+            catch (e) { /* This is binary audio for our own translation, handled by the Attend module logic */ return; }
+            if (message.type === 'status' && message.success) {
+                this.updateStatus('connected', 'Connected');
+                this.send({ type: 'start', languageCode: this.config.sourceLanguage, sampleRate: 16000 });
+                this.startAudioCapture();
+                resolve(this);
+            } else if (message.type === 'status' && !message.success) {
+                this.updateStatus('error', `Join: Failed - ${message.message}`);
+                this.disconnect();
+                reject(new Error(message.message));
+            } else if (message.type === 'result') {
+                this.updateTranscript(message.text);
+            }
+        },
+
+        startAudioCapture: function() {
+            if (this.mediaStream) this.stopAudioCapture();
+            const constraints = { audio: { deviceId: this.config.inputDeviceId ? { exact: this.config.inputDeviceId } : undefined, echoCancellation: true, noiseSuppression: false, autoGainControl: false, sampleRate: 16000, channelCount: 1 }};
+            navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+                this.mediaStream = stream;
+                this.audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = this.audioContext.createMediaStreamSource(stream);
+                const processor = this.audioContext.createScriptProcessor(2048, 1, 1);
+                const analyser = this.audioContext.createAnalyser();
+                source.connect(analyser); analyser.connect(processor); processor.connect(this.audioContext.destination);
+                processor.onaudioprocess = (e) => {
+                    const data = e.inputBuffer.getChannelData(0);
+                    const rms = this.getRMS(data);
+                    this.audioLevel = rms;
+                    this.updateVisualizer();
+                    incomingModule.applyDucking(rms > 0.02);
+                    if (!this.muted) {
+                        const pcmData = this.toPCM(data, 1.5); // Apply gain
+                        this.send(pcmData);
+                    }
+                };
+            }).catch(err => this.addSystemMessage("Could not get microphone.", true));
+        },
+        
+        disconnect: function() { this.stopAudioCapture(); if (this.websocket) { this.websocket.onclose = null; this.websocket.close(1000, 'User disconnected'); } this.updateStatus('disconnected', 'Disconnected'); },
+        send: function(data) { if (this.websocket?.readyState !== WebSocket.OPEN) return; if (data instanceof ArrayBuffer) this.websocket.send(data); else this.websocket.send(JSON.stringify(data)); },
+        getRMS: buffer => Math.sqrt(buffer.reduce((s, v) => s + v * v, 0) / buffer.length),
+        toPCM: function(buffer, gain) { const pcm = new Int16Array(buffer.length); for (let i = 0; i < buffer.length; i++) { const s = Math.max(-1, Math.min(1, buffer[i] * gain)); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; } return pcm.buffer; },
+        stopAudioCapture: function() { this.mediaStream?.getTracks().forEach(track => track.stop()); this.audioContext?.close().catch(()=>{}); this.audioLevel = 0; this.updateVisualizer(); },
+        updateStatus: function(status, message) { this.status = status; this.config.ui.statusLight.className = `session-status-light ${status}`; this.addSystemMessage(message, status === 'error'); },
+        updateTranscript: function(text) { if (!text) return; const el = document.createElement('div'); el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); },
+        addSystemMessage: function(text, isError=false) { const el = document.createElement('div'); el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); },
+        updateVisualizer: function() { if (!this.config.ui.visualizer) return; this.config.ui.visualizer.style.width = `${Math.min(100, this.audioLevel * 800)}%`; this.config.ui.visualizer.classList.toggle('muted', this.muted); },
+        toggleMute: function() { this.muted = !this.muted; this.config.ui.muteBtn.classList.toggle('muted', this.muted); },
+    };
+
+    // =====================================================================================
+    // --- MODULE 2: INCOMING "ATTEND" SESSION (Based on your original script) ---
+    // =====================================================================================
+    const incomingModule = {
+        websocket: null, status: 'disconnected', config: {}, audioQueue: [],
+        isPlaying: false, currentAudioElement: null, audioEnabled: true,
+
+        connect: function(config) {
+            this.config = config;
+            return new Promise((resolve, reject) => {
+                this.updateStatus('connecting', 'Connecting...');
+                const endpoint = 'wss://dev-endpoint.wordly.ai/attend';
+                this.websocket = new WebSocket(endpoint);
+                this.websocket.binaryType = 'arraybuffer';
+                const timeout = setTimeout(() => { this.websocket.close(); reject(new Error("Attend: Connection timed out.")); }, 10000);
+
+                this.websocket.onopen = () => {
+                    const connectRequest = { type: 'connect', presentationCode: this.config.sessionId, accessKey: this.config.passcode || undefined, languageCode: this.config.targetLanguage, };
+                    this.send(connectRequest);
+                };
+                this.websocket.onmessage = (event) => { clearTimeout(timeout); this.handleMessage(event, resolve, reject); };
+                this.websocket.onerror = (err) => { clearTimeout(timeout); this.updateStatus('error', 'Attend: Connection Error'); reject(err); };
+                this.websocket.onclose = (event) => { clearTimeout(timeout);
+                    if (this.status !== 'connected') { this.updateStatus('error', 'Attend: Connection Failed'); reject(new Error(`Attend: Connection closed unexpectedly. Code: ${event.code}`)); }
+                    else { this.updateStatus('disconnected', 'Disconnected'); }
+                };
+            });
+        },
+
+        handleMessage: function(event, resolve, reject) {
+            const decoder = new TextDecoder('utf-8');
+            let message;
+            try { message = JSON.parse(decoder.decode(event.data)); } catch (e) { return; }
+            if (message.type === 'status' && message.success) {
+                this.updateStatus('connected', 'Connected');
+                if (this.audioEnabled) this.send({ type: 'voice', enabled: true });
+                resolve(this);
+            } else if (message.type === 'status' && !message.success) {
+                this.updateStatus('error', `Attend: Failed - ${message.message}`);
+                this.disconnect();
+                reject(new Error(message.message));
+            } else if (message.type === 'speech') {
+                this.playAudio(message.synthesizedSpeech.data);
+            } else if (message.type === 'phrase') {
+                this.updateTranscript(message.translatedText);
+            }
+        },
+        
+        playAudio: function(data) {
+            if (!this.audioEnabled) return;
+            this.audioQueue.push({ data, deviceId: this.config.outputDeviceId });
+            this.processAudioQueue();
+        },
+
+        processAudioQueue: function() {
+            if (this.isPlaying || this.audioQueue.length === 0) return;
+            this.isPlaying = true; const item = this.audioQueue.shift(); const blob = new Blob([new Uint8Array(item.data)], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob); const audio = new Audio(url); this.currentAudioElement = audio;
+            audio.oncanplaythrough = async () => { if (item.deviceId && state.supportsSinkId) { try { await audio.setSinkId(item.deviceId); } catch (err) { console.error("setSinkId failed:", err); } } audio.play().catch(e => console.error("Playback failed:", e)); };
+            const cleanup = () => { URL.revokeObjectURL(url); this.isPlaying = false; this.currentAudioElement = null; setTimeout(() => this.processAudioQueue(), 0); };
+            audio.onended = cleanup; audio.onerror = cleanup;
+        },
+
+        disconnect: function() { this.stopAudioPlayback(); if (this.websocket) { this.websocket.onclose = null; this.websocket.close(1000, 'User disconnected'); } this.updateStatus('disconnected', 'Disconnected'); },
+        send: function(data) { if (this.websocket?.readyState === WebSocket.OPEN) this.websocket.send(JSON.stringify(data)); },
+        stopAudioPlayback: function() { this.audioQueue = []; if (this.currentAudioElement) { this.currentAudioElement.pause(); this.currentAudioElement.src = ''; } this.isPlaying = false; },
+        applyDucking: function(isSpeaking) { if (this.currentAudioElement) this.currentAudioElement.volume = isSpeaking ? parseFloat(duckingSlider.value) : 1.0; },
+        updateStatus: function(status, message) { this.status = status; this.config.ui.statusLight.className = `session-status-light ${status}`; this.addSystemMessage(message, status === 'error'); },
+        updateTranscript: function(text) { if (!text) return; const el = document.createElement('div'); el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); },
+        addSystemMessage: function(text, isError=false) { const el = document.createElement('div'); el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); },
+        toggleAudio: function(enabled) { this.audioEnabled = enabled; if (this.status === 'connected') this.send({ type: 'voice', enabled: this.audioEnabled }); if (!this.audioEnabled) this.stopAudioPlayback(); },
+    };
 
     // ===================================================================================
-    // --- INITIALIZATION FLOW ---
+    // --- ORCHESTRATOR ---
     // ===================================================================================
     async function handleLogin(e) {
-        e.preventDefault(); // Prevent page refresh
+        e.preventDefault();
         showLoginStatus("Getting audio devices & permissions...");
         try {
-            // This is the critical step: get permissions and devices BEFORE loading the main page.
-            await refreshAllDeviceLists();
-            
-            // Store credentials from the form for later use
+            await initializeAudioDevices();
             state.sessionConfigs.outgoing = getCredentialsFromUI('outgoing');
             state.sessionConfigs.incoming = getCredentialsFromUI('incoming');
-
-            // Now, transition to the main page
             loginPage.style.display = 'none';
             appPage.style.display = 'flex';
             setupUIEventListeners();
@@ -57,103 +197,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // ===================================================================================
-    // --- Core Session Class ---
-    // ===================================================================================
-    class WordlySession {
-        constructor(type, config) {
-            this.type = type; this.config = config; this.isCaptureSession = (this.type === 'join');
-            this.websocket = null; this.status = 'disconnected'; this.audioQueue = [];
-            this.isPlaying = false; this.currentAudioElement = null; this.audioEnabled = true;
-            if (this.isCaptureSession) { this.muted = false; this.mediaStream = null; this.audioContext = null; this.audioLevel = 0; }
-        }
-        connect() {
-            return new Promise((resolve, reject) => {
-                this.updateStatus('connecting', 'Connecting...');
-                const endpoint = this.isCaptureSession ? 'wss://dev-endpoint.wordly.ai/present' : 'wss://dev-endpoint.wordly.ai/attend';
-                this.websocket = new WebSocket(endpoint);
-                this.websocket.binaryType = 'arraybuffer';
-                const timeout = setTimeout(() => { this.websocket.close(); reject(new Error(`${this.type}: Connection timed out.`)); }, 10000);
-                this.websocket.onopen = () => {
-                    const connectRequest = this.isCaptureSession ? {
-                        type: 'connect', presentationCode: this.config.sessionId, accessKey: this.config.passcode,
-                        languageCode: this.config.sourceLanguage, speakerId: `babelfish-join-${Date.now()}`,
-                        name: 'My Voice (Babelfish)', connectionCode: 'wordly-babelfish-app', context: null
-                    } : {
-                        type: 'connect', presentationCode: this.config.sessionId, accessKey: this.config.passcode || undefined,
-                        languageCode: this.config.targetLanguage,
-                    };
-                    this.send(connectRequest);
-                };
-                this.websocket.onmessage = (event) => { clearTimeout(timeout); this.handleMessage(event, resolve, reject); };
-                this.websocket.onerror = (err) => { clearTimeout(timeout); this.updateStatus('error', `${this.type}: Connection Error`); reject(err); };
-                this.websocket.onclose = () => {
-                    clearTimeout(timeout);
-                    if (this.status !== 'connected') { this.updateStatus('error', `${this.type}: Connection Failed`); reject(new Error(`${this.type}: Connection closed unexpectedly.`)); }
-                    else { this.updateStatus('disconnected', 'Disconnected'); }
-                };
-            });
-        }
-        disconnect() {
-            if (this.isCaptureSession) this.stopAudioCapture(); else this.stopAudioPlayback();
-            if (this.websocket) { this.websocket.onclose = null; this.websocket.close(1000, 'User disconnected'); }
-            this.updateStatus('disconnected', 'Disconnected');
-        }
-        send(data) { if (this.websocket?.readyState !== WebSocket.OPEN) return; if (data instanceof ArrayBuffer) this.websocket.send(data); else this.websocket.send(JSON.stringify(data)); }
-        handleMessage(event, resolve, reject) {
-            if (!(event.data instanceof ArrayBuffer)) return;
-            const decoder = new TextDecoder('utf-8'); let message;
-            try { message = JSON.parse(decoder.decode(event.data)); } catch (e) { this.playAudio(event.data); return; }
-            if (message.type === 'status') {
-                if (message.success) {
-                    this.updateStatus('connected', 'Connected');
-                    const commands = this.isCaptureSession ?
-                        [{ type: 'change', languageCode: this.config.targetLanguage }, { type: 'start', languageCode: this.config.sourceLanguage, sampleRate: 16000 }, { type: 'voice', enabled: true }] :
-                        [{ type: 'change', languageCode: this.config.targetLanguage }, { type: 'voice', enabled: this.audioEnabled }];
-                    commands.forEach(cmd => this.send(cmd));
-                    if (this.isCaptureSession) this.startAudioCapture();
-                    resolve(this);
-                } else { this.updateStatus('error', `Failed: ${message.message}`); this.disconnect(); reject(new Error(message.message)); }
-            } else if (message.type === 'speech') { if (!this.isCaptureSession) this.playAudio(message.synthesizedSpeech.data);
-            } else if (message.type === 'phrase' || message.type === 'result') { this.updateTranscript(message);
-            } else if (message.type === 'error') { this.addSystemMessage(`Error: ${message.message}`, true); }
-        }
-        playAudio(data) { if (!this.audioEnabled) return; this.audioQueue.push({ data, deviceId: this.config.outputDeviceId }); this.processAudioQueue(); }
-        processAudioQueue() {
-            if (this.isPlaying || this.audioQueue.length === 0) return;
-            this.isPlaying = true; const item = this.audioQueue.shift(); const blob = new Blob([new Uint8Array(item.data)], { type: 'audio/wav' });
-            const url = URL.createObjectURL(blob); const audio = new Audio(url); this.currentAudioElement = audio;
-            audio.oncanplaythrough = async () => { if (item.deviceId && state.supportsSinkId) { try { await audio.setSinkId(item.deviceId); } catch (err) { console.error("setSinkId failed:", err); } } audio.play().catch(e => console.error("Playback failed:", e)); };
-            const cleanup = () => { URL.revokeObjectURL(url); this.isPlaying = false; this.currentAudioElement = null; setTimeout(() => this.processAudioQueue(), 0); };
-            audio.onended = cleanup; audio.onerror = cleanup;
-        }
-        stopAudioPlayback() { this.audioQueue = []; if (this.currentAudioElement) { this.currentAudioElement.pause(); this.currentAudioElement.src = ''; } this.isPlaying = false; }
-        startAudioCapture() {
-            if (this.mediaStream) this.stopAudioCapture();
-            const constraints = { audio: { deviceId: this.config.inputDeviceId ? { exact: this.config.inputDeviceId } : undefined, sampleRate: 16000, channelCount: 1, echoCancellation: true } };
-            navigator.mediaDevices.getUserMedia(constraints).then(stream => {
-                this.mediaStream = stream; this.audioContext = new AudioContext({ sampleRate: 16000 });
-                const source = this.audioContext.createMediaStreamSource(stream); const processor = this.audioContext.createScriptProcessor(2048, 1, 1);
-                const analyser = this.audioContext.createAnalyser(); source.connect(analyser); analyser.connect(processor); processor.connect(this.audioContext.destination);
-                processor.onaudioprocess = (e) => {
-                    const data = e.inputBuffer.getChannelData(0); const rms = this.getRMS(data); this.audioLevel = rms; this.updateVisualizer();
-                    state.incomingSession?.applyDucking(rms > 0.02); if (!this.muted) this.send(this.toPCM(data));
-                };
-            }).catch(err => this.addSystemMessage("Could not get microphone.", true));
-        }
-        getRMS = buffer => Math.sqrt(buffer.reduce((s, v) => s + v * v, 0) / buffer.length);
-        toPCM(buffer) { const pcm = new Int16Array(buffer.length); for (let i = 0; i < buffer.length; i++) pcm[i] = Math.max(-1, Math.min(1, buffer[i])) * 0x7FFF; return pcm.buffer; }
-        stopAudioCapture() { this.mediaStream?.getTracks().forEach(track => track.stop()); this.audioContext?.close().catch(()=>{}); this.audioLevel = 0; this.updateVisualizer(); }
-        applyDucking(isSpeaking) { if (this.currentAudioElement) this.currentAudioElement.volume = isSpeaking ? parseFloat(duckingSlider.value) : 1.0; }
-        updateStatus(status, message) { this.status = status; this.config.ui.statusLight.className = `session-status-light ${status}`; this.addSystemMessage(message, status === 'error' || status === 'failed'); }
-        updateTranscript(message) { const text = message.text || message.translatedText; if (!text) return; const el = document.createElement('div'); el.className = 'phrase'; el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); }
-        addSystemMessage(text, isError = false) { const el = document.createElement('div'); el.className = isError ? 'phrase system-message error' : 'phrase system-message'; el.textContent = text; this.config.ui.transcript.insertBefore(el, this.config.ui.transcript.firstChild); }
-        updateVisualizer() { if (!this.config.ui.visualizer) return; this.config.ui.visualizer.style.width = `${Math.min(100, this.audioLevel * 800)}%`; this.config.ui.visualizer.classList.toggle('muted', this.muted); }
-        toggleMute() { this.muted = !this.muted; this.config.ui.muteBtn.classList.toggle('muted', this.muted); }
-        toggleAudio(enabled) { this.audioEnabled = enabled; if (this.status === 'connected') this.send({ type: 'voice', enabled: this.audioEnabled }); if (!this.audioEnabled) this.stopAudioPlayback(); }
-    }
-
-    // --- ORCHESTRATOR ---
     function handleConnectionToggle() {
         if (state.isConnecting) { disconnectAll(); }
         else if (state.isConnected) { disconnectAll(); }
@@ -164,19 +207,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.isConnecting) return;
         state.isConnecting = true;
         updateConnectionButton(true, "Cancel");
-
-        const outConfig = getSettingsFromUI('outgoing');
-        const inConfig = getSettingsFromUI('incoming');
-
-        state.outgoingSession = new WordlySession('join', outConfig);
-        state.incomingSession = new WordlySession('attend', inConfig);
+        outgoingModule.config.ui.transcript.innerHTML = '';
+        incomingModule.config.ui.transcript.innerHTML = '';
+        
         try {
-            await Promise.all([ state.outgoingSession.connect(), state.incomingSession.connect() ]);
+            await Promise.all([
+                outgoingModule.connect(getSettingsFromUI('outgoing')),
+                incomingModule.connect(getSettingsFromUI('incoming'))
+            ]);
             state.isConnected = true;
         } catch (error) {
-            console.error("Failed to connect one or more sessions:", error);
-            if (state.outgoingSession.status === 'connected') state.outgoingSession.disconnect();
-            if (state.incomingSession.status === 'connected') state.incomingSession.disconnect();
+            console.error("One or more sessions failed to connect:", error);
+            outgoingModule.disconnect();
+            incomingModule.disconnect();
             state.isConnected = false;
         } finally {
             state.isConnecting = false;
@@ -185,8 +228,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function disconnectAll() {
-        state.outgoingSession?.disconnect(); state.incomingSession?.disconnect();
-        state.isConnected = false; state.isConnecting = false;
+        outgoingModule.disconnect();
+        incomingModule.disconnect();
+        state.isConnected = false;
+        state.isConnecting = false;
         updateConnectionButton(false);
     }
     
@@ -222,8 +267,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setupUIEventListeners() {
-        document.querySelector('#outgoing-session .mute-btn').onclick = () => state.outgoingSession?.toggleMute();
-        document.getElementById('incoming-audio-toggle').onchange = (e) => state.incomingSession?.toggleAudio(e.target.checked);
+        document.querySelector('#outgoing-session .mute-btn').onclick = () => outgoingModule.toggleMute();
+        document.getElementById('incoming-audio-toggle').onchange = (e) => incomingModule.toggleAudio(e.target.checked);
+    }
+
+    async function initializeAudioDevices() {
+        try { await refreshAllDeviceLists(); }
+        catch (err) {
+            showLoginStatus("Could not access audio devices. Please grant permission.", true);
+            throw err;
+        }
     }
 
     async function refreshAllDeviceLists() {
